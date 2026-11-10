@@ -1,0 +1,552 @@
+<script>
+(function () {
+  'use strict';
+
+  /* ── 공통 ── */
+  var boot = null;
+  var $ = function (id) { return document.getElementById(id); };
+  var WEEK = ['일', '월', '화', '수', '목', '금', '토'];
+
+  function call(fn) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve, reject) {
+      var r = google.script.run.withSuccessHandler(resolve).withFailureHandler(function (e) {
+        reject(new Error((e && e.message) || String(e)));
+      });
+      r[fn].apply(r, args);
+    });
+  }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function msg(el, text, ok) { el.className = 'msg ' + (ok ? 'ok' : 'err'); el.textContent = text; }
+  function clearMsg(el) { el.className = 'msg'; el.textContent = ''; }
+  /** 확인 질문을 버튼 자리에 띄웁니다. 브라우저 확인창(confirm·prompt)은 막힌 화면이 있어 쓰지 않습니다. */
+  function ask(btn, opt, onOk) {
+    var cell = btn.parentNode, old = cell.querySelector('.ask');
+    if (old) old.remove();
+    var box = document.createElement('div');
+    box.className = 'ask';
+    box.innerHTML = '<p>' + esc(opt.text) + '</p>' +
+      (opt.reason ? '<input type="text" placeholder="취소 사유 (비워도 됩니다)" aria-label="취소 사유">' : '') +
+      '<div class="row"><button type="button" class="small primary">' + esc(opt.ok) + '</button><button type="button" class="small">그만두기</button></div>';
+    var bs = box.querySelectorAll('button'), input = box.querySelector('input');
+    bs[0].addEventListener('click', function () { bs[0].disabled = bs[1].disabled = true; onOk(input ? input.value : ''); });
+    bs[1].addEventListener('click', function () { box.remove(); btn.hidden = false; });
+    btn.hidden = true;
+    cell.appendChild(box);
+    (input || bs[0]).focus({ preventScroll: true });
+  }
+  var STATE_LABEL = { '반납지연': '반납 지연', '사용종료': '사용 종료' };
+  function badge(s) { return '<span class="badge b-' + esc(s) + '">' + esc(STATE_LABEL[s] || s) + '</span>'; }
+  function pretty(s) {
+    if (!s || s.length < 10) return esc(s);
+    var d = new Date(s.slice(0, 10) + 'T00:00:00');
+    return esc(s.slice(5, 10).replace('-', '/') + ' (' + WEEK[d.getDay()] + ')' + (s.length > 10 ? ' ' + s.slice(11, 16) : ''));
+  }
+  function ymd(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+  /** 표를 만듭니다. 좁은 화면에서는 CSS가 줄마다 카드로 바꾸고, data-label을 칸 이름으로 보여 줍니다. (plain: 카드로 바꾸지 않음) */
+  function table(headers, rows, empty, plain) {
+    if (!rows.length) return '<p class="muted">' + (empty || '없습니다.') + '</p>';
+    return '<table' + (plain ? '' : ' class="cards"') + '><thead><tr>' + headers.map(function (h) { return '<th>' + h + '</th>'; }).join('') +
+      '</tr></thead><tbody>' + rows.map(function (r) {
+        return '<tr>' + r.map(function (c, i) {
+          var h = headers[i] ? ' data-label="' + esc(String(headers[i]).replace(/<[^>]*>/g, '')) + '"' : ' class="act"';
+          return '<td' + h + '>' + (headers[i] && !plain ? '<div>' + c + '</div>' : c) + '</td>';
+        }).join('') + '</tr>';
+      }).join('') + '</tbody></table>';
+  }
+  function equipName(id) {
+    var e = (boot.equipment.concat(admin.data ? admin.data.equipment : [])).filter(function (x) { return x.id === id; })[0];
+    return e ? e.name : id;
+  }
+
+  /* ── 탭 ── */
+  function showTab(name) {
+    document.querySelectorAll('#tabs button').forEach(function (b) {
+      b.classList.toggle('on', b.dataset.tab === name);
+      if (b.dataset.tab === name) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    });
+    ['rent', 'shoot', 'mine', 'admin'].forEach(function (t) { $('tab-' + t).hidden = t !== name; });
+    // 탭을 열 때마다 서버에서 새로 읽어, 다른 화면·다른 사람이 바꾼 내용이 바로 보이게
+    if (name === 'rent') refreshAvailability();
+    if (name === 'shoot') loadSlots(true);
+    if (name === 'mine') loadMine();
+    if (name === 'admin') admin.load();
+  }
+  $('tabs').addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b || !b.dataset.tab) return;
+    showTab(b.dataset.tab);
+    window.scrollTo(0, 0);
+  });
+
+  /* ── ① 카메라 대여 ── */
+  function fillTimes(sel, def) {
+    for (var h = 8; h <= 22; h++) {
+      ['00', '30'].forEach(function (m) {
+        if (h === 22 && m === '30') return;
+        var v = ('0' + h).slice(-2) + ':' + m;
+        var o = new Option(v, v);
+        if (v === def) o.selected = true;
+        sel.add(o);
+      });
+    }
+  }
+  fillTimes($('startTime'), '10:00');
+  fillTimes($('endTime'), '18:00');
+
+  function rentRange() {
+    var sd = $('startDate').value, ed = $('endDate').value;
+    if (!sd || !ed) return null;
+    return { start: sd + ' ' + $('startTime').value, end: ed + ' ' + $('endTime').value };
+  }
+
+  function currentCampus(box) {
+    var c = document.querySelector('#' + (box || 'campusPick') + ' input:checked');
+    return c ? c.value : '';
+  }
+  function campusTag(c) { return c ? '<span class="badge b-campus">' + esc(c) + '</span> ' : ''; }
+  function renderCampuses() {
+    var saved = currentCampus();
+    try { saved = saved || localStorage.getItem('campus') || ''; } catch (e) {}
+    if (boot.campuses.indexOf(saved) < 0) saved = boot.campuses[0] || '';
+    [['campusPick', 'campus'], ['shootCampusPick', 'shootCampus']].forEach(function (p) {
+      var cur = currentCampus(p[0]) || saved;
+      $(p[0]).innerHTML = boot.campuses.map(function (c) {
+        return '<label><input type="radio" name="' + p[1] + '" value="' + esc(c) + '"' + (c === cur ? ' checked' : '') + '> ' + esc(c) + '캠퍼스</label>';
+      }).join('');
+    });
+    $('newEquipCampus').innerHTML = boot.campuses.map(function (c) { return '<option>' + esc(c) + '</option>'; }).join('');
+  }
+  $('campusPick').addEventListener('change', function () {
+    try { localStorage.setItem('campus', currentCampus()); } catch (e) {}
+    clearMsg($('rentMsg'));
+    refreshAvailability();
+  });
+
+  var availSeq = 0;
+  function refreshAvailability() {
+    if (!boot) return;
+    var r = rentRange();
+    var campus = currentCampus();
+    var mine = boot.equipment.filter(function (e) { return !boot.campuses.length || e.campus === campus; });
+    var cams = mine.filter(function (e) { return e.type === '카메라'; });
+    var accs = mine.filter(function (e) { return e.type === '악세사리'; });
+    if (!r || r.end <= r.start) {
+      var why0 = r ? '반납 일시가 대여 일시보다 뒤여야 합니다' : '대여·반납 일시를 먼저 선택하세요';
+      $('camera').innerHTML = $('accessory').innerHTML = '<option value="">' + why0 + '</option>';
+      return;
+    }
+    var seq = ++availSeq;
+    var prevCam = $('camera').value, prevAcc = $('accessory').value;
+    $('camera').innerHTML = $('accessory').innerHTML = '<option value="">확인 중…</option>';
+    call('getAvailability', r.start, r.end).then(function (list) {
+      if (seq !== availSeq) return;
+      var ok = {}, why = {};
+      list.forEach(function (x) { ok[x.id] = x.available; why[x.id] = x.reason; });
+      function options(list, prev) {
+        return list.map(function (c) {
+          return '<option value="' + esc(c.id) + '"' + (ok[c.id] ? '' : ' disabled') + (ok[c.id] && c.id === prev ? ' selected' : '') + '>' +
+            esc(c.name) + (ok[c.id] ? '' : '  —  ' + esc(why[c.id])) + '</option>';
+        }).join('');
+      }
+      $('camera').innerHTML = cams.length
+        ? (boot.accessoryOnly ? '<option value="">카메라 없음</option>' : '<option value="">카메라를 선택하세요</option>') + options(cams, prevCam)
+        : '<option value="">이 캠퍼스에 등록된 카메라가 없습니다</option>';
+      $('accessory').innerHTML = accs.length
+        ? '<option value="">선택 안 함</option>' + options(accs, prevAcc)
+        : '<option value="">이 캠퍼스에 등록된 악세사리가 없습니다</option>';
+    }).catch(function (e) { msg($('rentMsg'), e.message); });
+  }
+  ['startDate', 'startTime', 'endDate', 'endTime'].forEach(function (id) {
+    $(id).addEventListener('change', function () {
+      if (id === 'startDate' && !$('endDate').value) $('endDate').value = $('startDate').value;
+      clearMsg($('rentMsg'));
+      refreshAvailability();
+    });
+  });
+
+  $('rentForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var r = rentRange();
+    if (!r) return msg($('rentMsg'), '대여·반납 일시를 선택해 주세요.');
+    var req = {
+      start: r.start, end: r.end, cameraId: $('camera').value,
+      campus: currentCampus(),
+      accessoryIds: $('accessory').value ? [$('accessory').value] : [],
+      reason: $('reason').value
+    };
+    $('rentSubmit').disabled = true;
+    msg($('rentMsg'), '신청 중…', true);
+    call('submitRental', req).then(function (res) {
+      msg($('rentMsg'), '예약이 확정되었습니다. (예약번호 ' + res.groupId + ')\n' +
+        res.start + ' → ' + res.end + ' · ' + res.names.join(', ') +
+        (res.mailError ? '\n※ 확정 메일 발송에 실패했습니다. 홍보실에 알려 주세요.' : '\n확정 메일을 보냈습니다.'), true);
+      $('reason').value = '';
+      refreshAvailability();
+    }).catch(function (err) { msg($('rentMsg'), err.message); })
+      .then(function () { $('rentSubmit').disabled = false; });
+  });
+
+  /* ── ② 사진촬영 지원 ── */
+  var chosenSlot = null;
+  function loadSlots(keep) {
+    var prev = keep ? chosenSlot : null;
+    chosenSlot = null;
+    var d = $('shootDate').value;
+    if (!d) { $('slots').innerHTML = '<span class="muted">날짜를 먼저 선택하세요</span>'; return Promise.resolve(); }
+    $('slots').innerHTML = '<span class="muted">확인 중…</span>';
+    return call('getShootSlots', d).then(function (slots) {
+      $('slots').innerHTML = slots.map(function (s) {
+        return '<button type="button" data-start="' + esc(s.start) + '"' + (s.available ? '' : ' disabled title="' +
+          (s.past ? '지난 시간' : '근무 학생 없음') + '"') + '>' + esc(s.label) + '</button>';
+      }).join('') + (slots.some(function (s) { return s.available; }) ? '' : '<span class="muted">이 날은 신청 가능한 시간이 없습니다.</span>');
+      // 다시 읽었을 때 고른 시간대가 아직 가능하면 그대로 선택
+      var again = prev && $('slots').querySelector('button[data-start="' + prev + '"]:not([disabled])');
+      if (again) { chosenSlot = prev; again.classList.add('sel'); }
+    }).catch(function (e) { $('slots').innerHTML = ''; msg($('shootMsg'), e.message); });
+  }
+  $('shootDate').addEventListener('change', function () { clearMsg($('shootMsg')); loadSlots(); });
+  $('slots').addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b || b.disabled) return;
+    chosenSlot = b.dataset.start;
+    $('slots').querySelectorAll('button').forEach(function (x) { x.classList.toggle('sel', x === b); });
+  });
+  $('shootForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (!chosenSlot) return msg($('shootMsg'), '시간대를 선택해 주세요.');
+    $('shootSubmit').disabled = true;
+    call('submitShoot', { campus: currentCampus('shootCampusPick'), date: $('shootDate').value, start: chosenSlot, place: $('place').value, cuts: $('cuts').value })
+      .then(function (res) {
+        msg($('shootMsg'), '접수되었습니다. (신청번호 ' + res.id + ')\n홍보실이 학생·카메라를 배정하면 확정 메일을 보내 드립니다.', true);
+        $('place').value = ''; $('cuts').value = '';
+        loadSlots();
+      }).catch(function (err) { msg($('shootMsg'), err.message); })
+      .then(function () { $('shootSubmit').disabled = false; });
+  });
+
+  /* ── 내 신청 ── */
+  function loadMine() {
+    $('myRentals').innerHTML = $('myShoots').innerHTML = '<p class="muted">불러오는 중…</p>';
+    call('getMyRequests').then(function (r) {
+      $('myRentals').innerHTML = table(['예약번호', '대여', '반납 예정', '장비', '사유', '상태', ''], r.rentals.map(function (g) {
+        var act = g.canReturn ? '<button class="small primary" data-return="' + esc(g.groupId) + '">반납 완료</button>'
+          : g.canCancel ? '<button class="small" data-cancelmine="' + esc(g.groupId) + '">예약 취소</button>'
+          : g.returnedAt ? '<span class="muted">' + pretty(g.returnedAt) + ' 반납</span>' : '';
+        return [esc(g.groupId), pretty(g.start), pretty(g.end), esc(g.items.map(function (i) { return i.name; }).join(', ')), esc(g.reason), badge(g.state), act];
+      }), '대여 신청 내역이 없습니다.');
+      $('myShoots').innerHTML = table(['신청번호', '일시', '장소·동선', '배정 학생', '상태', ''], r.shoots.map(function (s) {
+        var act = s.canCancel ? '<button class="small" data-cancelshootmine="' + esc(s.id) + '">신청 취소</button>' : '';
+        return [esc(s.id), campusTag(s.campus) + pretty(s.date) + ' ' + esc(s.start + '–' + s.end), esc(s.place), esc(s.worker || '-'), badge(s.status), act];
+      }), '촬영지원 신청 내역이 없습니다.');
+    }).catch(function (e) { $('myRentals').innerHTML = '<p class="msg err">' + esc(e.message) + '</p>'; });
+  }
+
+  $('myRentals').addEventListener('click', function (e) {
+    var d = e.target.dataset;
+    if (d.return) {
+      ask(e.target, { text: '장비를 제자리에 반납하셨나요? 반납 완료를 누르면 다른 학생이 바로 빌릴 수 있게 됩니다.', ok: '반납 완료' }, function () {
+        call('returnMyRental', d.return).then(function () { loadMine(); refreshAvailability(); })
+          .catch(function (err) { loadMine(); alertMine(err.message); });
+      });
+    } else if (d.cancelmine) {
+      ask(e.target, { text: '이 예약을 취소할까요?', ok: '예약 취소' }, function () {
+        call('cancelMyRental', d.cancelmine).then(function () { loadMine(); refreshAvailability(); })
+          .catch(function (err) { loadMine(); alertMine(err.message); });
+      });
+    }
+  });
+  function alertMine(text, where) { $(where || 'myRentals').insertAdjacentHTML('afterbegin', '<p class="msg err">' + esc(text) + '</p>'); }
+
+  $('myShoots').addEventListener('click', function (e) {
+    var id = e.target.dataset.cancelshootmine;
+    if (!id) return;
+    ask(e.target, { text: '이 촬영지원 신청을 취소할까요? 이미 배정된 경우 배정 학생과 홍보실에 취소 메일이 갑니다.', ok: '신청 취소' }, function () {
+      call('cancelMyShoot', id).then(function () { loadMine(); })
+        .catch(function (err) { loadMine(); alertMine(err.message, 'myShoots'); });
+    });
+  });
+
+  /* ── ③ 관리자 ── */
+  var admin = {
+    data: null,
+    sub: 'rentals',
+    weekStart: (function () { var d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d; })(),
+    load: function () {
+      return call('adminGetData').then(function (d) { admin.data = d; admin.render(); })
+        .catch(function (e) { msg($('adminMsg'), e.message); });
+    },
+    run: function (p, okText) {
+      clearMsg($('adminMsg'));
+      return p.then(function (res) {
+        if (okText) msg($('adminMsg'), okText + (res && res.mailError ? '\n※ ' + res.mailError : ''), !(res && res.mailError));
+        return admin.load();
+      }).catch(function (e) { msg($('adminMsg'), e.message); });
+    },
+    render: function () {
+      this.renderWeek(); this.renderRentals(); this.renderShoots(); this.renderEquip(); this.renderSchedule(); this.renderSettings();
+    },
+    renderWeek: function () {
+      var d = this.data, days = [];
+      for (var i = 0; i < 7; i++) { var x = new Date(this.weekStart); x.setDate(x.getDate() + i); days.push(ymd(x)); }
+      $('weekLabel').textContent = days[0].replace(/-/g, '.') + ' ~ ' + days[6].slice(5).replace('-', '.');
+      var active = d.rentals.filter(function (g) { return g.status === '예약' || g.status === '대여중'; });
+      var rows = d.equipment.filter(function (e) { return e.active; }).map(function (e) {
+        return ['<b>' + esc(e.name) + '</b>' + (e.campus ? '<br><span class="muted">' + esc(e.campus) + '</span>' : '')].concat(days.map(function (day) {
+          var dayEnd = day + ' 23:59', dayStart = day + ' 00:00';
+          return active.filter(function (g) {
+            return g.items.some(function (it) { return it.id === e.id; }) && g.start <= dayEnd && g.end >= dayStart;
+          }).map(function (g) {
+            var s = g.start.slice(0, 10) === day ? g.start.slice(11) : '…';
+            var en = g.end.slice(0, 10) === day ? g.end.slice(11) : '…';
+            return '<div class="bar' + (g.type === '촬영' ? ' shoot' : '') + (g.state === '반납지연' ? ' late' : '') + '" title="' + esc(g.email + ' · ' + g.reason) + '">' +
+              esc(s + '–' + en) + '<br>' + esc(g.type === '촬영' ? '촬영 ' + g.email.split('@')[0] : g.email.split('@')[0]) + '</div>';
+          }).join('');
+        }));
+      });
+      $('weekGrid').innerHTML = '<div class="grid">' + table(['장비'].concat(days.map(function (x) { return pretty(x); })), rows, '', true) + '</div>';
+    },
+    renderRentals: function () {
+      var f = $('rentalFilter').value;
+      var list = this.data.rentals.filter(function (g) {
+        return f === 'active' ? ['예약', '대여중', '반납지연'].indexOf(g.state) >= 0 : (!f || g.state === f);
+      }).sort(function (a, b) { return a.start < b.start ? -1 : 1; });
+      $('rentalList').innerHTML = table(['번호', '유형', '신청자', '대여', '반납 예정', '장비', '사유', '상태', '반납한 시각', ''], list.map(function (g) {
+        var act = g.type === '대여' && g.state === '예약' ? '<button class="small" data-cancelrental="' + esc(g.groupId) + '">예약 취소</button>' : '';
+        return [esc(g.groupId), esc(g.type), esc(g.email), pretty(g.start), pretty(g.end),
+          esc(g.items.map(function (i) { return i.name; }).join(', ')), esc(g.reason), badge(g.state), g.returnedAt ? pretty(g.returnedAt) : '-', act];
+      }), '해당하는 예약이 없습니다.');
+    },
+    renderShoots: function () {
+      var list = this.data.shoots.slice().sort(function (a, b) {
+        var w = { '접수': 0, '확정': 1, '취소': 2 };
+        return (w[a.status] - w[b.status]) || ((a.date + a.start) < (b.date + b.start) ? -1 : 1);
+      });
+      $('shootList').innerHTML = table(['번호', '일시', '신청자', '장소·동선', '필요한 컷', '배정', '상태', ''], list.map(function (s) {
+        var act = s.status === '접수' ? '<button class="small" data-assign="' + esc(s.id) + '">배정</button> ' : '';
+        if (s.status !== '취소') act += '<button class="small" data-cancelshoot="' + esc(s.id) + '">취소</button>';
+        return [esc(s.id), campusTag(s.campus) + pretty(s.date) + ' ' + esc(s.start + '–' + s.end), esc(s.email), esc(s.place), esc(s.cuts),
+          s.worker ? esc(s.worker) + ' / ' + esc(equipName(s.cameraId)) : '-', badge(s.status), act];
+      }), '촬영지원 신청이 없습니다.');
+    },
+    openAssign: function (id) {
+      $('assignPanel').innerHTML = '<p class="muted">불러오는 중…</p>';
+      call('adminGetAssignOptions', id).then(function (o) {
+        var s = o.shoot;
+        $('assignPanel').innerHTML = '<div class="card"><strong>' + campusTag(s.campus) + pretty(s.date) + ' ' + esc(s.start + '–' + s.end) + ' · ' + esc(s.place) + '</strong>' +
+          '<p class="muted">신청자 ' + esc(s.email) + ' · 필요한 컷: ' + esc(s.cuts) + '</p>' +
+          '<h3>근무 학생 (이 시간 근무자' + (o.group ? ' · ' + esc(o.group) + ' 근무일' : o.group === '' ? ' · 근무 없는 날' : '') + ')</h3>' +
+          '<p class="muted">시간대를 여러 학생이 나눠 맡을 수 있습니다. 나갈 학생을 모두 고르세요.</p>' +
+          (o.workers.length ? o.workers.map(function (w) {
+            return '<label class="opt"><input type="checkbox" name="aw" value="' + esc(w.key) + '" data-from="' + esc(w.from) + '" data-to="' + esc(w.to) + '" checked> ' +
+              esc(w.name) + ' <b>' + esc(w.from + '–' + w.to) + '</b> <span class="muted">' + esc(w.email || '이메일 미등록 · 학생 메일 안 감') + '</span></label>';
+          }).join('') + '<p id="gapNote" class="muted"></p>' : '<p class="msg err">이 시간에 배정 가능한 근무 학생이 없습니다.</p>') +
+          '<h3>사용 가능 카메라' + (s.campus ? ' (' + esc(s.campus) + '캠퍼스 카메라만)' : '') + '</h3>' +
+          o.cameras.map(function (c) {
+            return '<label class="opt' + (c.available ? '' : ' off') + '"><input type="radio" name="ac" value="' + esc(c.id) + '"' + (c.available ? '' : ' disabled') + '> ' +
+              esc(c.name) + (c.campus ? ' <span class="muted">' + esc(c.campus) + '</span>' : '') + ' — ' + (c.available ? '사용 가능' : esc(c.reason) + ' (선택 불가)') + '</label>';
+          }).join('') +
+          '<div class="row" style="margin-top:12px"><button class="primary" id="doAssign" data-id="' + esc(s.id) + '">배정 완료 · 안내 메일 발송</button>' +
+          '<button type="button" id="closeAssign">닫기</button></div></div>';
+        admin.slot = { start: s.start, end: s.end };
+        admin.updateGap();
+        var firstCam = document.querySelector('#assignPanel input[name=ac]:not([disabled])');
+        if (firstCam) firstCam.checked = true;
+      }).catch(function (e) { $('assignPanel').innerHTML = ''; msg($('adminMsg'), e.message); });
+    },
+    /** 고른 학생들이 비워 두는 시간이 있으면 알려 줌 */
+    updateGap: function () {
+      var note = $('gapNote');
+      if (!note || !admin.slot) return;
+      var toMin = function (hm) { var p = hm.split(':'); return +p[0] * 60 + +p[1]; };
+      var toHm = function (m) { return ('0' + (m / 60 | 0)).slice(-2) + ':' + ('0' + m % 60).slice(-2); };
+      var picked = Array.prototype.map.call(document.querySelectorAll('#assignPanel input[name=aw]:checked'), function (i) {
+        return [toMin(i.dataset.from), toMin(i.dataset.to)];
+      }).sort(function (x, y) { return x[0] - y[0]; });
+      var cur = toMin(admin.slot.start), end = toMin(admin.slot.end), gaps = [];
+      picked.forEach(function (r) { if (r[0] > cur) gaps.push(toHm(cur) + '–' + toHm(Math.min(r[0], end))); cur = Math.max(cur, r[1]); });
+      if (cur < end) gaps.push(toHm(cur) + '–' + toHm(end));
+      note.className = gaps.length ? 'msg err' : 'muted';
+      note.textContent = gaps.length ? '선택한 학생으로는 ' + gaps.join(', ') + '에 나갈 사람이 없습니다.' : '선택한 학생들이 촬영 시간 전체를 맡습니다.';
+    },
+    renderEquip: function () {
+      var campuses = boot.campuses;
+      var list = this.data.equipment.slice().sort(function (a, b) {
+        return String(a.campus).localeCompare(String(b.campus)) || a.type.localeCompare(b.type) || a.id.localeCompare(b.id, undefined, { numeric: true });
+      });
+      $('equipList').innerHTML = table(['캠퍼스', 'ID', '구분', '이름', '비고', '사용', ''], list.map(function (e) {
+        var sel = '<select data-ecampus="' + esc(e.id) + '" aria-label="캠퍼스">' + (campuses.indexOf(e.campus) < 0 ? '<option value="">(미지정)</option>' : '') +
+          campuses.map(function (c) { return '<option' + (c === e.campus ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select>';
+        return [sel, esc(e.id), esc(e.type), '<input data-ename="' + esc(e.id) + '" value="' + esc(e.name) + '">',
+          '<input data-enote="' + esc(e.id) + '" value="' + esc(e.note) + '">',
+          '<label><input type="checkbox" data-eactive="' + esc(e.id) + '"' + (e.active ? ' checked' : '') + '> 사용</label>',
+          '<button class="small" data-esave="' + esc(e.id) + '" data-etype="' + esc(e.type) + '">저장</button>'];
+      }));
+    },
+    renderSchedule: function () {
+      var order = { '월': 1, '화': 2, '수': 3, '목': 4, '금': 5, '토': 6, '일': 7 };
+      var list = this.data.schedule.slice().sort(function (a, b) {
+        return String(a.group).localeCompare(String(b.group)) || (order[a.day] - order[b.day]) || (a.start < b.start ? -1 : 1);
+      });
+      $('scheduleGrid').innerHTML = table(['근무조', '요일', '시간', '학생', '팀', '이메일', ''], list.map(function (w) {
+        return [esc(w.group || '-'), esc(w.day), esc(w.start + '–' + w.end), esc(w.name), esc(w.team), w.email ? esc(w.email) : '<span class="muted">미등록</span>',
+          '<button class="small" data-delsched="' + w.row + '" data-name="' + esc(w.name) + '" data-day="' + esc(w.day) + '" data-start="' + esc(w.start) + '">삭제</button>'];
+      }), '등록된 근무시간이 없습니다. 아래에서 추가하세요.');
+      // 근무달력: 같은 근무조·메모가 이어지는 날짜를 한 줄로 묶어 보여 줌
+      var ranges = [];
+      this.data.calendar.slice().sort(function (a, b) { return a.date < b.date ? -1 : 1; }).forEach(function (c) {
+        var last = ranges[ranges.length - 1];
+        if (last && last.group === c.group && last.note === c.note) last.to = c.date;
+        else ranges.push({ from: c.date, to: c.date, group: c.group, note: c.note });
+      });
+      $('calendarList').innerHTML = table(['기간', '근무조', '메모'], ranges.map(function (r) {
+        return [pretty(r.from) + (r.to !== r.from ? ' ~ ' + pretty(r.to) : ''), r.group === '없음' ? '<span class="muted">근무 없음</span>' : badge(r.group), esc(r.note)];
+      }), '근무달력이 비어 있어 근무조 구분 없이 모든 근무시간을 씁니다. 시트의 ‘근무달력’ 탭에 날짜별 근무조를 넣으세요.');
+    },
+    renderSettings: function () {
+      $('settingsList').innerHTML = table(['항목', '값', '설명'], this.data.settings.map(function (s) {
+        return [esc(s.key), esc(s.value), '<span class="muted">' + esc(s.note) + '</span>'];
+      }));
+    }
+  };
+
+  $('subtabs').addEventListener('click', function (e) {
+    var b = e.target.closest('button'), s = b && b.dataset.sub; if (!s) return;
+    admin.sub = s;
+    document.querySelectorAll('#subtabs button').forEach(function (b) { b.classList.toggle('on', b.dataset.sub === s); });
+    document.querySelectorAll('#tab-admin .sub').forEach(function (d) { d.hidden = d.id !== 'sub-' + s; });
+    clearMsg($('adminMsg'));
+  });
+  $('weekPrev').addEventListener('click', function () { admin.weekStart.setDate(admin.weekStart.getDate() - 7); admin.renderWeek(); });
+  $('weekNext').addEventListener('click', function () { admin.weekStart.setDate(admin.weekStart.getDate() + 7); admin.renderWeek(); });
+  $('rentalFilter').addEventListener('change', function () { admin.renderRentals(); });
+
+  $('tab-admin').addEventListener('change', function (e) {
+    if (e.target.name === 'aw') return admin.updateGap();
+  });
+  $('tab-admin').addEventListener('click', function (e) {
+    var t = e.target, d = t.dataset;
+    if (d.assign) {
+      admin.openAssign(d.assign);
+      $('assignPanel').scrollIntoView({ behavior: 'smooth' });
+    } else if (t.id === 'closeAssign') {
+      $('assignPanel').innerHTML = '';
+    } else if (t.id === 'doAssign') {
+      var ws = Array.prototype.map.call(document.querySelectorAll('#assignPanel input[name=aw]:checked'), function (i) { return i.value; });
+      var c = document.querySelector('#assignPanel input[name=ac]:checked');
+      if (!ws.length || !c) return msg($('adminMsg'), '학생과 카메라를 선택해 주세요.');
+      t.disabled = true;
+      admin.run(call('adminAssignShoot', d.id, ws, c.value), '배정을 완료하고 안내 메일을 보냈습니다.')
+        .then(function () { $('assignPanel').innerHTML = ''; });
+    } else if (d.cancelrental) {
+      ask(t, { text: '이 대여 예약을 취소할까요? 학생에게 취소 메일이 갑니다.', ok: '예약 취소', reason: true }, function (why) {
+        admin.run(call('adminCancelRental', d.cancelrental, why), '예약을 취소하고 학생에게 메일을 보냈습니다.').then(refreshAvailability);
+      });
+    } else if (d.cancelshoot) {
+      ask(t, { text: '이 촬영지원 신청을 취소할까요? 배정된 카메라 일정도 함께 풀립니다.', ok: '신청 취소' }, function () {
+        admin.run(call('adminCancelShoot', d.cancelshoot), '신청을 취소했습니다.');
+      });
+    } else if (d.esave) {
+      var id = d.esave;
+      admin.run(call('adminSaveEquipment', {
+        id: id, type: d.etype,
+        name: document.querySelector('[data-ename="' + id + '"]').value,
+        note: document.querySelector('[data-enote="' + id + '"]').value,
+        campus: document.querySelector('[data-ecampus="' + id + '"]').value,
+        active: document.querySelector('[data-eactive="' + id + '"]').checked
+      }), '장비 정보를 저장했습니다.').then(reloadBoot);
+    } else if (d.delsched) {
+      admin.run(call('adminDeleteSchedule', Number(d.delsched), { name: d.name, day: d.day, start: d.start }), '근무시간을 삭제했습니다.');
+    }
+  });
+  $('equipAdd').addEventListener('submit', function (e) {
+    e.preventDefault();
+    admin.run(call('adminSaveEquipment', { campus: $('newEquipCampus').value, type: $('newEquipType').value, name: $('newEquipName').value }), '장비를 추가했습니다.')
+      .then(function () { $('newEquipName').value = ''; return reloadBoot(); });
+  });
+  $('schedAdd').addEventListener('submit', function (e) {
+    e.preventDefault();
+    admin.run(call('adminAddSchedule', { name: $('wName').value, email: $('wEmail').value, group: $('wGroup').value, team: $('wTeam').value, day: $('wDay').value, start: $('wStart').value, end: $('wEnd').value }),
+      '근무시간을 추가했습니다.').then(function () { $('wName').value = ''; $('wEmail').value = ''; });
+  });
+
+  /* ── 시작 ── */
+  function reloadBoot() {
+    return call('getBootstrap').then(function (b) {
+      boot = b;
+      $('who').textContent = '로그인: ' + b.email + (b.isAdmin ? ' (관리자)' : '');
+      $('adminTab').hidden = !b.isAdmin;
+      // 사진촬영 지원은 관리자만 (서버도 관리자만 허용)
+      $('shootTab').hidden = $('myShootsBox').hidden = !b.isAdmin;
+      $('rentRule').textContent = '신청하면 바로 확정되고 메일이 갑니다. 다 쓰고 반납한 뒤 ‘내 신청’에서 반납 완료를 눌러야 다음 사람이 빌릴 수 있습니다. 같은 장비는 반납 예정 후 ' + b.bufferMin + '분 동안 다음 대여를 받지 않고, 최대 ' + b.maxDays + '일까지 빌릴 수 있습니다.' +
+        (b.isAdmin ? ' (관리자는 기간 제한 없음)' : '');
+      var today = b.now.slice(0, 10);
+      $('startDate').min = $('endDate').min = $('shootDate').min = today;
+      renderCampuses();
+      refreshAvailability();
+    });
+  }
+  /* ── 로그인 화면 ── */
+  function enterApp() {
+    $('login').hidden = true;
+    $('app').hidden = false;
+    window.scrollTo(0, 0);
+    reloadBoot().then(function () { showTab('rent'); }).catch(function (e) { $('who').textContent = e.message; });
+  }
+  /** 로그인 화면을 (다시) 띄우고 지금 계정을 확인합니다. 이전 계정의 화면 내용은 비웁니다. */
+  function showLogin() {
+    boot = null; admin.data = null;
+    $('app').hidden = true;
+    $('login').hidden = false;
+    $('loginState').hidden = true;
+    $('loginEmail').value = '';
+    $('enterBtn').disabled = false;
+    ['rentMsg', 'shootMsg', 'adminMsg'].forEach(function (id) { clearMsg($(id)); });
+    ['myRentals', 'myShoots', 'rentalList', 'shootList', 'assignPanel'].forEach(function (id) { $(id).innerHTML = ''; });
+    ['reason', 'place', 'cuts'].forEach(function (id) { $(id).value = ''; });
+    $('rentalFilter').value = 'active';
+    var first = document.querySelector('#subtabs button');
+    if (first) first.click();
+    window.scrollTo(0, 0);
+    return call('getLoginInfo').then(showLoginInfo)
+      .catch(function (e) { loginError(e.message); });
+  }
+  function loginError(text) {
+    $('loginState').className = 'login-state err';
+    $('loginState').textContent = text;
+    $('loginState').hidden = false;
+  }
+  function showLoginInfo(info) {
+    $('loginDomain').textContent = info.domain;
+    $('loginEmail').placeholder = '학번 또는 아이디@' + info.domain;
+    if (info.photo) {
+      var img = $('loginPhoto');
+      img.onload = function () { img.hidden = false; $('login').classList.add('has-photo'); };
+      img.src = info.photo;
+    }
+    if (info.appUrl) {
+      $('switchAcct').href = 'https://accounts.google.com/AccountChooser?continue=' + encodeURIComponent(info.appUrl);
+      $('switchAcct').hidden = false;
+    }
+    $('loginEmail').focus();
+  }
+  $('loginForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var email = $('loginEmail').value.trim();
+    var domain = $('loginDomain').textContent;
+    // 서버에 묻기 전에 화면에서 먼저 거름 (서버 login()도 같은 확인을 함)
+    if (!/^[^\s@]+@[^\s@]+$/.test(email)) return loginError('학교 메일 주소를 정확히 입력해 주세요. (예: 학번@' + domain + ')');
+    if (email.toLowerCase().slice(-(domain.length + 1)) !== '@' + domain) return loginError('학교 메일(@' + domain + ') 계정이 있어야 신청할 수 있습니다.');
+    $('enterBtn').disabled = true;
+    $('loginState').hidden = true;
+    call('login', email).then(enterApp).catch(function (err) { $('enterBtn').disabled = false; loginError(err.message); });
+  });
+  $('logoutBtn').addEventListener('click', showLogin);
+  window.hufsShowLogin = showLogin; // 체험판에서 계정을 바꿀 때 새로고침 없이 다시 로그인
+  showLogin();
+})();
+</script>

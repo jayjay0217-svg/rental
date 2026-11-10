@@ -1,0 +1,18 @@
+{
+  "name": "hufs-pr-equipment-rental",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HUFS 홍보실 장비대여 · 사진촬영지원 웹앱 (Google Apps Script + Google Sheets)",
+  "scripts": {
+    "dev": "node dev/server.js 8080",
+    "test": "node --test test/logic.test.js test/server.test.js test/deploy.test.js",
+    "test:e2e": "node --test --test-concurrency=1 test/e2e.test.js",
+    "push": "clasp push",
+    "build": "node scripts/build-deploy.js",
+    "build:demo": "node scripts/build-demo.js"
+  },
+  "devDependencies": {
+    "@google/clasp": "^2.4.2",
+    "playwright": "^1.48.0"
+  }
+}
