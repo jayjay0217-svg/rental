@@ -403,3 +403,19 @@ test('사진촬영 지원은 관리자만: 학생은 조회·신청·취소 모�
   assert.deepEqual(g.call('getMyRequests').shoots, []);
   assert.equal(g.as(STAFF).call('getMyRequests').shoots.length, 1);
 });
+
+test('예외 관리자 계정(jayjay0217@gmail.com): 학교 밖이지만 로그인·관리자 기능·근무표 입력 가능, 다른 gmail은 계속 막힘', () => {
+  const JAY = 'jayjay0217@gmail.com';
+  const g = createGas();
+  g.as(ADMIN).call('setup'); // 설정 탭이 생긴 뒤에도
+  g.as(JAY);
+  assert.match(g.call('importFall2026Schedule'), /근무 학생 30건/);
+  assert.deepEqual(g.call('login', 'JayJay0217@gmail.com'), { email: JAY, isAdmin: true });
+  assert.equal(g.call('getLoginInfo').allowed, true);
+  assert.equal(g.call('getBootstrap').isAdmin, true);
+  g.call('adminGetData');
+  g.call('setup');
+  assert.throws(() => g.as('someone@gmail.com').call('login', 'someone@gmail.com'), /계정이 있어야/);
+  assert.throws(() => g.as('someone@gmail.com').call('importFall2026Schedule'), /계정으로만/);
+  assert.throws(() => g.as('jayjay0217@gmail.com.evil.com').call('getBootstrap'), /계정으로만/);
+});

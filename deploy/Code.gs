@@ -418,6 +418,10 @@ var SHEETS = {
   settings: { name: '설정', headers: ['항목', '값', '설명'] }
 };
 
+// 학교(허용도메인) 밖이지만 항상 허용하는 관리자 계정 (사용자 요청: 설치·관리용 개인 계정)
+// 다른 학교 밖 계정은 계속 막힙니다.
+var EXTRA_ADMIN_ACCOUNTS = ['jayjay0217@gmail.com'];
+
 var DEFAULT_SETTINGS = [
   ['관리자이메일', 'hufspr@hufs.ac.kr', '관리자를 추가하려면 같은 항목으로 한 줄 더 추가'],
   ['여유시간(분)', '60', '반납 후 다음 대여까지 비워 둘 시간'],
@@ -915,7 +919,12 @@ function currentEmail_() {
   return String(Session.getActiveUser().getEmail() || '').toLowerCase();
 }
 
+function isExtraAdmin_(email) {
+  return !!email && EXTRA_ADMIN_ACCOUNTS.indexOf(String(email).toLowerCase()) >= 0;
+}
+
 function isAllowedEmail_(email, settings) {
+  if (isExtraAdmin_(email)) return true;
   return !!email && email.slice(-(settings.domain.length + 1)) === '@' + settings.domain;
 }
 
@@ -926,7 +935,7 @@ function getSettings_() {
 function requireUser_() {
   var email = currentEmail_(), settings = getSettings_();
   if (!isAllowedEmail_(email, settings)) throw new Error('@' + settings.domain + ' 계정으로만 이용할 수 있습니다.');
-  return { email: email, settings: settings, isAdmin: settings.admins.indexOf(email) >= 0 };
+  return { email: email, settings: settings, isAdmin: settings.admins.indexOf(email) >= 0 || isExtraAdmin_(email) };
 }
 
 function requireAdmin_() {

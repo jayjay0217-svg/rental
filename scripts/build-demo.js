@@ -154,7 +154,9 @@ html, body { background: #f4f4f0; color: #1d2329; }
 
 `;
 const logic = rd('Logic.js'), code = rd('Code.js'), data = rd('Data2026Fall.js');
-const html = `<title>HUFS 장비대여 체험판</title>
+const html = `<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HUFS 장비대여 체험판</title>
 <style>${styles}${extraCss}</style>
 ${demoBar}
 ${body}

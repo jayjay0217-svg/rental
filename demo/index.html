@@ -1,3 +1,5 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HUFS 장비대여 체험판</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap');
@@ -886,6 +888,10 @@ var SHEETS = {
   settings: { name: '설정', headers: ['항목', '값', '설명'] }
 };
 
+// 학교(허용도메인) 밖이지만 항상 허용하는 관리자 계정 (사용자 요청: 설치·관리용 개인 계정)
+// 다른 학교 밖 계정은 계속 막힙니다.
+var EXTRA_ADMIN_ACCOUNTS = ['jayjay0217@gmail.com'];
+
 var DEFAULT_SETTINGS = [
   ['관리자이메일', 'hufspr@hufs.ac.kr', '관리자를 추가하려면 같은 항목으로 한 줄 더 추가'],
   ['여유시간(분)', '60', '반납 후 다음 대여까지 비워 둘 시간'],
@@ -1383,7 +1389,12 @@ function currentEmail_() {
   return String(Session.getActiveUser().getEmail() || '').toLowerCase();
 }
 
+function isExtraAdmin_(email) {
+  return !!email && EXTRA_ADMIN_ACCOUNTS.indexOf(String(email).toLowerCase()) >= 0;
+}
+
 function isAllowedEmail_(email, settings) {
+  if (isExtraAdmin_(email)) return true;
   return !!email && email.slice(-(settings.domain.length + 1)) === '@' + settings.domain;
 }
 
@@ -1394,7 +1405,7 @@ function getSettings_() {
 function requireUser_() {
   var email = currentEmail_(), settings = getSettings_();
   if (!isAllowedEmail_(email, settings)) throw new Error('@' + settings.domain + ' 계정으로만 이용할 수 있습니다.');
-  return { email: email, settings: settings, isAdmin: settings.admins.indexOf(email) >= 0 };
+  return { email: email, settings: settings, isAdmin: settings.admins.indexOf(email) >= 0 || isExtraAdmin_(email) };
 }
 
 function requireAdmin_() {
@@ -2208,7 +2219,7 @@ function importFall2026Schedule() {
     var domain = $('loginDomain').textContent;
     // 서버에 묻기 전에 화면에서 먼저 거름 (서버 login()도 같은 확인을 함)
     if (!/^[^\s@]+@[^\s@]+$/.test(email)) return loginError('학교 메일 주소를 정확히 입력해 주세요. (예: 학번@' + domain + ')');
-    if (email.toLowerCase().slice(-(domain.length + 1)) !== '@' + domain) return loginError('학교 메일(@' + domain + ') 계정이 있어야 신청할 수 있습니다.');
+    // 학교 메일인지는 서버 login()이 판단 (서버에 등록된 관리자 예외 계정이 있음)
     $('enterBtn').disabled = true;
     $('loginState').hidden = true;
     call('login', email).then(enterApp).catch(function (err) { $('enterBtn').disabled = false; loginError(err.message); });

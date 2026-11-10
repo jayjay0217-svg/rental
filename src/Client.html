@@ -540,7 +540,7 @@
     var domain = $('loginDomain').textContent;
     // 서버에 묻기 전에 화면에서 먼저 거름 (서버 login()도 같은 확인을 함)
     if (!/^[^\s@]+@[^\s@]+$/.test(email)) return loginError('학교 메일 주소를 정확히 입력해 주세요. (예: 학번@' + domain + ')');
-    if (email.toLowerCase().slice(-(domain.length + 1)) !== '@' + domain) return loginError('학교 메일(@' + domain + ') 계정이 있어야 신청할 수 있습니다.');
+    // 학교 메일인지는 서버 login()이 판단 (서버에 등록된 관리자 예외 계정이 있음)
     $('enterBtn').disabled = true;
     $('loginState').hidden = true;
     call('login', email).then(enterApp).catch(function (err) { $('enterBtn').disabled = false; loginError(err.message); });

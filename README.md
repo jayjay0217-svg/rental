@@ -177,3 +177,15 @@ test/           ← 자동 테스트
 
 - 사진촬영 지원 메뉴는 관리자(설정 탭 ‘관리자이메일’)에게만 보입니다. 학생 화면에는 메뉴와 ‘내 신청’의 촬영 목록이 나오지 않습니다.
 - 서버에서도 촬영 시간대 조회·등록·취소를 관리자만 할 수 있게 막았습니다. 관리자가 등록한 뒤 관리자 → 촬영지원 배정에서 학생·카메라를 배정합니다.
+
+## GitHub Pages에 올렸을 때
+
+- GitHub Pages는 저장소 맨 위의 `index.html`(없으면 `index.md`, `README.md`)을 첫 화면으로 씁니다. 그래서 `index.html`이 없을 때는 이 README가 그대로 보였습니다.
+- 지금은 맨 위 `index.html`이 체험판(`demo/`)으로 바로 넘겨 줍니다. 주소: `https://<계정>.github.io/<저장소>/` (체험판 직접 주소는 끝에 `demo/`).
+- GitHub Pages에서 도는 것은 **체험판**입니다. 시트·메일 없이 그 브라우저 안에만 저장됩니다. 실제로 신청을 받고 메일을 보내는 앱은 위 ‘처음 설치하기’대로 Apps Script에 `deploy/Code.gs`, `deploy/Index.html`을 붙여 넣고 배포해야 합니다. (Apps Script 서버 코드는 GitHub Pages에서 실행되지 않습니다.)
+- `.nojekyll` 파일은 GitHub Pages가 파일을 Jekyll로 바꾸지 않고 그대로 내보내게 합니다.
+
+## 학교 밖 관리자 계정 (예외)
+
+- `src/Code.js` 맨 위 `EXTRA_ADMIN_ACCOUNTS`에 적힌 계정(현재 jayjay0217@gmail.com)은 @hufs.ac.kr이 아니어도 로그인·관리자 기능·`setup`·`importFall2026Schedule`을 쓸 수 있습니다. 다른 학교 밖 계정은 계속 막힙니다.
+- 주의: 실제 웹앱은 **hufspr@hufs.ac.kr 계정으로 배포**해야 학생 계정 확인이 됩니다. Apps Script 문서에 따르면 ‘나로 실행’ 웹앱에서는 사용자가 개발자와 같은 Google Workspace 도메인일 때만 사용자 메일을 알 수 있습니다. gmail 계정이 만든·배포한 웹앱이면 학생 메일을 읽지 못해 학생이 로그인할 수 없습니다.
